@@ -1,0 +1,9 @@
+{
+  "template": "template.xlsx",
+  "manufacturer": "FMS TRADE",
+  "eu_responsible_person": "",
+  "shipping_template": "Сандански",
+  "default_stock": 20,
+  "estimate_package_dimensions": true,
+  "workers": 4
+}
