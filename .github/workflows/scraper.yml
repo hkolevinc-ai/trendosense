@@ -1,0 +1,32 @@
+name: Trendosense to Temu
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'Products: 15 for test, 0 for all'
+        default: '0'
+        required: true
+permissions:
+  contents: read
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify template handling
+        run: python -m unittest test_scraper.py
+      - name: Scrape, fill template and validate
+        env:
+          PRODUCT_LIMIT: ${{ inputs.limit }}
+        run: python scraper.py --limit "$PRODUCT_LIMIT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trendosense-temu-results
+          path: outputs/
+          if-no-files-found: error
+          retention-days: 30
