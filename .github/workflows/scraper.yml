@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Verify template handling
-        run: python -m unittest test_scraper.py
+        run: python -m unittest discover -p 'test_*.py'
       - name: Scrape, fill template and validate
         env:
           PRODUCT_LIMIT: ${{ inputs.limit }}
