@@ -7,6 +7,7 @@ from decimal import Decimal, ROUND_CEILING
 from html.parser import HTMLParser
 from pathlib import Path
 from temu import Template, number
+from extraction import ALIASES as EXTRA_ALIASES, apply_fields
 
 BASE='https://trendosense.com'
 class Text(HTMLParser):
@@ -91,6 +92,8 @@ MAP=[
 
 def choose_category(p):
     title=short(p['name']).lower(); cats=' '.join(c['name'].lower() for c in p.get('categories',[]));d=clean(p.get('description','')).lower()
+    if re.search(r'сапун|\bsoap\b',title):return '18937',''
+    if re.search(r'body lotion|лосион за тяло',title):return '18948',''
     if re.search(r'ламп|floor lamp|sun.?screen|слънцезащит|крем за (?:ръце|крака)|hand cream|foot cream',title):return '', 'Няма подходяща категория в прикачения шаблон'
     if re.search(r'augue|adipiscing|eames|wooden single|classic wooden|henectus|lorem|ipsum',title):return '', 'Вероятен демонстрационен продукт'
     if re.search(r'парфюм|eau de |perfume|cologne|body mist|спрей.*тяло',title):
@@ -146,12 +149,18 @@ ALIASES={
  'Wood':r'дърво|дървен|wood','Metal':r'метал|metal','Glass':r'стъкло|стъклен|glass',
  'Plastic':r'пластмас|plastic','MDF':r'\bмдф\b|\bmdf\b',
 }
+ALIASES.update(EXTRA_ALIASES)
+
 @lru_cache(maxsize=4096)
 def option_pattern(option):
     return re.compile(ALIASES.get(option) or (r'(?<!\w)'+re.escape(option)+r'(?!\w)'),re.I)
 
 def matches(option,text):
-    return len(option)>2 and bool(option_pattern(option).search(text))
+    if len(option)<=2:return False
+    for m in option_pattern(option).finditer(text):
+        prefix=text[max(0,m.start()-40):m.start()]
+        if not re.search(r'(?:без|не съдържа|free from)\s+(?:\w+\s+){0,2}$',prefix,re.I):return True
+    return False
 
 def content(p):
     # Strip store/service information, retain actual product properties and INCI.
@@ -200,7 +209,7 @@ def expand(p):
 def row_for(p,t,config,override):
     row={};notes=[];cat,reason=choose_category(p);cat=str(override.get('E') or cat)
     title=short(p['name']);txt=content(p);evidence=title+'\n'+txt+'\n'+p.get('_extra',{}).get('attribute_text','')+'\n'+clean(p.get('short_description',''))
-    for a in p.get('attributes',[]):evidence+='\n'+a.get('name','')+': '+', '.join(str(x) for x in a.get('terms',[]))
+    for a in p.get('attributes',[]):evidence+='\n'+a.get('name','')+': '+', '.join(x.get('name','') if isinstance(x,dict) else str(x) for x in a.get('terms',[]))
     def put(c,v):
         if v is not None and v!='' and t.allowed(c,dict(row,E=cat)):row[c]=v
     row.update(E=cat,G='Normal product',L=title[:500],M='TS-'+str(p.get('_parent_id',p['id'])),N=p.get('sku') or 'TS-'+str(p['id']),O='Add',T=txt[:2000],YH=p['permalink'])
@@ -302,7 +311,7 @@ def row_for(p,t,config,override):
             h=t.headers[c]
             if h=='1561 - Power Supply' and cat in ['12507','12508','12796','12797','25088','12606']:
                 if 'Use Without Electricity' in opts:put(c,'Use Without Electricity');continue
-            if h=='4102 - Contain Wooden Materials' and re.search(r'дърв|\bwood|\bmdf|пдч|мдф',evidence,re.I):
+            if h=='4102 - Contain Wooden Materials' and re.search(r'дърв|\bwood(?:en)?\b|\bmdf|пдч|мдф',evidence,re.I):
                 if 'Yes' in opts:put(c,'Yes');continue
             if h=='7972 - Application Scenarios' and 'For Human Use' in opts and re.search(r'козметика|кожа|коса|лице|устни',evidence,re.I):
                 put(c,'For Human Use');continue
@@ -310,6 +319,7 @@ def row_for(p,t,config,override):
                 if v not in matched:matched[v]=matches(v,evidence)
             selected=[v for v in dict.fromkeys(opts) if matched[v]]
             for c,v in zip(cs,selected):put(c,v)
+    apply_fields(p,t,row,evidence,notes)
     # Product-specific merchant overrides use exact column letters and dropdown values.
     for c,v in override.items():
         if c in t.headers and v!='':row[c]=v
@@ -340,7 +350,7 @@ def main():
     overrides={}
     if Path('overrides.csv').exists():
         with open('overrides.csv',encoding='utf-8-sig',newline='') as f:overrides={r['product_id']:r for r in csv.DictReader(f) if r.get('product_id')}
-    drafts=[];ready=[];issues=[];audit=[];seen=set();categories=Counter();fields=Counter()
+    drafts=[];ready=[];complete=[];excluded=[];issues=[];audit=[];seen=set();categories=Counter();fields=Counter()
     for parent in products:
         try:
             if parent.get('type')=='grouped':
@@ -356,17 +366,23 @@ def main():
                 audit.append(record)
                 if errors:issues.append(record)
                 else:ready.append(row)
-                if row.get('E') in t.categories:drafts.append(row)
+                if row.get('E') in t.categories:
+                    if float(row.get('YG',0))<=0:excluded.append(record)
+                    else:
+                        drafts.append(row)
+                        if not [e for e in errors if e not in ['Missing: Country/Region of Origin','Missing: EU Responsible person']]:complete.append(row)
         except Exception as e:
             issues.append({'product_id':parent['id'],'name':parent['name'],'url':parent['permalink'],'issues':'Processing error: '+str(e)})
+    (out/'product_fields_complete.json').write_text(json.dumps(complete,ensure_ascii=False,indent=2))
+    write_csv(out/'excluded_zero_price.csv',excluded,['product_id','sku','name','url','category','issues','notes'])
     (out/'draft_rows.json').write_text(json.dumps(drafts,ensure_ascii=False,indent=2));(out/'ready_rows.json').write_text(json.dumps(ready,ensure_ascii=False,indent=2))
     headers=['product_id','sku','name','url','category','issues','notes'];write_csv(out/'needs_data.csv',issues,headers);write_csv(out/'audit.csv',audit,headers)
     write_csv(out/'category_rules.csv',[{'category_id':cat,'category_path':path,'field':t.headers[cs[0]],'columns':','.join(cs),'conditional':str(cs[0] in t.rules.get(cat+'_condition_require',set()))} for cat,path in t.categories.items() for cs in t.groups(cat)],['category_id','category_path','field','columns','conditional'])
     write_csv(out/'dropdown_values.csv',[{'key':k,'values':' | '.join(v)} for k,v in t.dropdowns.items()],['key','values'])
     if not args.no_xlsx:
-        for prefix,rows in [('DRAFT_REVIEW',drafts),('TEMU_READY',ready)]:
+        for prefix,rows in [('DRAFT_REVIEW',drafts),('TEMU_READY',ready),('PRODUCT_FIELDS_COMPLETE_REVIEW',complete)]:
             for i in range(0,len(rows),2000):t.write(rows[i:i+2000],out/f'{prefix}_{i//2000+1:03}.xlsx')
-    summary={'catalog_products':len(products),'mapped_sku_rows':len(drafts),'ready_sku_rows':len(ready),'records_with_issues':len(issues),'categories':dict(categories),'issues':dict(fields.most_common()),'manufacturer':cfg['manufacturer'],'template_categories':len(t.categories),'enriched_products':sum('_extra' in p for p in products)}
+    summary={'catalog_products':len(products),'mapped_sku_rows':len(drafts),'ready_sku_rows':len(ready),'product_fields_complete_except_origin_rp':len(complete),'records_with_issues':len(issues),'categories':dict(categories),'issues':dict(fields.most_common()),'manufacturer':cfg['manufacturer'],'template_categories':len(t.categories),'enriched_products':sum('_extra' in p for p in products)}
     (out/'summary.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2));print(json.dumps(summary,ensure_ascii=False,indent=2))
     if not ready:print('No upload-ready file: see needs_data.csv. Drafts are for review only.')
 
